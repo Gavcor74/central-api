@@ -1,3 +1,7 @@
 *.zip
 desktop.ini
 Despacho Fase 1 - Correo a Dropbox CRM Aviso.json
+.venv/
+__pycache__/
+*.pyc
+central.db
