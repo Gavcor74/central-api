@@ -9,8 +9,33 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from services.notion_mcp import get_notion_mcp_config
+from services.openclaw import get_openclaw_config
+from services.transcriber import get_transcriber_config
+
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_env_file(path: Path) -> None:
+    if not path.is_file():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+load_env_file(BASE_DIR / "env")
+load_env_file(BASE_DIR / ".env")
+
 DB_PATH = Path(os.getenv("CENTRAL_DB_PATH", BASE_DIR / "central.db"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "")
@@ -25,6 +50,13 @@ CORRECTOR_MODEL = os.getenv("CORRECTOR_MODEL", DEFAULT_MODEL)
 NOTION_API_TOKEN = os.getenv("NOTION_API_TOKEN", "")
 NOTION_CONTENT_DB_ID = os.getenv("NOTION_CONTENT_DB_ID", "")
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
+OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "")
+OPENCLAW_API_KEY = os.getenv("OPENCLAW_API_KEY", "")
+NOTION_MCP_URL = os.getenv("NOTION_MCP_URL", "")
+NOTION_MCP_API_KEY = os.getenv("NOTION_MCP_API_KEY", "")
+TRANSCRIBER_PROVIDER = os.getenv("TRANSCRIBER_PROVIDER", "")
+TRANSCRIBER_MODEL = os.getenv("TRANSCRIBER_MODEL", "")
+TRANSCRIBER_API_KEY = os.getenv("TRANSCRIBER_API_KEY", "")
 
 
 WRITING_CORRECTION_PROMPT = """
@@ -223,6 +255,30 @@ class NotionConfigResponse(BaseModel):
     has_token: bool
     has_database_id: bool
     database_id: str | None
+
+
+class OpenClawConfigResponse(BaseModel):
+    enabled: bool
+    base_url: str | None
+    has_api_key: bool
+
+
+class NotionMcpConfigResponse(BaseModel):
+    enabled: bool
+    url: str | None
+    has_api_key: bool
+
+
+class TranscriberConfigResponse(BaseModel):
+    enabled: bool
+    provider: str | None
+    model: str | None
+    has_api_key: bool
+
+
+class TranscriptionRequest(BaseModel):
+    audio_source: str = Field(..., min_length=3, description="Ruta, URL o identificador del audio")
+    language: str | None = Field(default=None, description="Idioma esperado del audio")
 
 
 class NotionIdeaItem(BaseModel):
@@ -849,6 +905,39 @@ def tools_echo(payload: EchoRequest) -> dict[str, str]:
         "echo": payload.text,
         "timestamp": utc_now(),
     }
+
+
+@app.get("/openclaw/config", response_model=OpenClawConfigResponse, tags=["openclaw"])
+def openclaw_config() -> OpenClawConfigResponse:
+    config = get_openclaw_config()
+    return OpenClawConfigResponse(**config)
+
+
+@app.get("/notion/mcp/config", response_model=NotionMcpConfigResponse, tags=["notion"])
+def notion_mcp_config() -> NotionMcpConfigResponse:
+    config = get_notion_mcp_config()
+    return NotionMcpConfigResponse(**config)
+
+
+@app.get("/transcriber/config", response_model=TranscriberConfigResponse, tags=["transcriber"])
+def transcriber_config() -> TranscriberConfigResponse:
+    config = get_transcriber_config()
+    return TranscriberConfigResponse(**config)
+
+
+@app.post("/transcriber/transcribe", tags=["transcriber"])
+def transcriber_transcribe(payload: TranscriptionRequest) -> dict[str, Any]:
+    config = get_transcriber_config()
+    if not config["enabled"]:
+        raise HTTPException(status_code=503, detail="TRANSCRIBER_PROVIDER no esta configurado.")
+
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "El conector de transcripcion aun es un esqueleto. "
+            "Podemos enchufar Whisper, faster-whisper u otro proveedor en la siguiente iteracion."
+        ),
+    )
 
 
 @app.get("/telegram/config", response_model=TelegramConfigResponse, tags=["telegram"])

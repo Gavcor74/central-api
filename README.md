@@ -88,14 +88,13 @@ Variables actuales:
 - `NOTION_API_TOKEN`
 - `NOTION_CONTENT_DB_ID`
 - `NOTION_VERSION`
-
-Variables que probablemente añadiremos más adelante:
-
 - `OPENCLAW_BASE_URL`
 - `OPENCLAW_API_KEY`
 - `NOTION_MCP_URL`
+- `NOTION_MCP_API_KEY`
 - `TRANSCRIBER_PROVIDER`
 - `TRANSCRIBER_MODEL`
+- `TRANSCRIBER_API_KEY`
 
 ## Despliegue en EasyPanel
 
