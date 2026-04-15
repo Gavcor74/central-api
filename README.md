@@ -47,7 +47,7 @@ Estado comprobado en produccion:
 - guarda memoria simple en SQLite
 - registra historial de chats
 - recibe webhooks de Telegram
-- corrige writings en privado con IA
+- responde como asistente general en Telegram y puede corregir writings cuando se lo pides
 - permite publicar en canal desde un admin autorizado
 - genera borradores de Telegram desde ideas de Notion
 - expone un plan de configuracion para OpenClaw
@@ -99,6 +99,12 @@ Estado comprobado en produccion:
 - `GET /telegram/config`
 - `POST /telegram/webhook`
 - `POST /telegram/channel/content`
+
+Comportamiento actual del bot en chat privado:
+
+- responde como asistente general por defecto
+- usa `/writing texto` para corregir un writing en ingles
+- usa `/publish texto` para publicar en canal si eres admin
 
 ## Variables de entorno
 

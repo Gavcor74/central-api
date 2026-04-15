@@ -81,6 +81,23 @@ No inventes instrucciones del alumno. Si el texto es muy corto, indicalo con cla
 """.strip()
 
 
+GENERAL_ASSISTANT_PROMPT = """
+Eres un asistente personal general, claro, cercano y util.
+
+Objetivo:
+- responder de forma natural a preguntas y tareas variadas
+- ayudar a organizar ideas, resumir, redactar, planificar y pensar mejor
+- mantener un tono humano, directo y breve cuando convenga
+- si el usuario pide ingles, ayudarle con ese tema sin sonar a bot rigido
+
+Reglas:
+- responde en espanol salvo que el usuario pida otro idioma
+- si falta contexto, pregunta solo lo necesario
+- evita listas largas salvo que aporten valor real
+- no asumas que solo debes corregir writings: actua como asistente general
+""".strip()
+
+
 QUICKINGLES_DRAFT_PROMPT = """
 Actuas como asistente editorial del canal de Telegram "Quickinglés".
 
@@ -723,6 +740,14 @@ async def correct_writing(student_text: str) -> tuple[str, str]:
     )
 
 
+async def general_assistant_reply(user_text: str) -> tuple[str, str]:
+    return await generate_with_ollama(
+        message=user_text.strip(),
+        model=None,
+        system_prompt=GENERAL_ASSISTANT_PROMPT,
+    )
+
+
 async def handle_private_message(
     *,
     chat_id: str,
@@ -735,14 +760,7 @@ async def handle_private_message(
 
     if normalized.lower() in {"/start", "/help"}:
         reply_text = (
-            "Hola. Soy AGENTE 2026 Telegram.\n\n"
-            "Enviame un writing en ingles y te devolvere:\n"
-            "1. nivel estimado\n"
-            "2. errores principales\n"
-            "3. texto corregido\n"
-            "4. consejos breves\n\n"
-            "Si eres admin, tambien puedes usar:\n"
-            "/publish texto"
+            'Hola. Soy AGENTE 2026 Telegram.\n\nPuedes escribirme de forma natural y te ayudare como asistente personal.\nTambien puedo:\n- ayudarte con ingles y writings si me lo pides\n- resumir, organizar ideas o redactar texto\n- publicar en canal si eres admin con /publish texto'
         )
         await send_telegram_message(chat_id, reply_text)
         save_telegram_log(
@@ -800,18 +818,47 @@ async def handle_private_message(
         )
         return {"status": "ok", "action": "publish_success"}
 
-    model_used, correction = await correct_writing(normalized)
-    await send_telegram_message(chat_id, correction)
+    if normalized.lower().startswith("/writing"):
+        writing_text = normalized[len("/writing") :].strip()
+        if not writing_text:
+            reply_text = "Escribe /writing seguido del texto que quieres que corrija."
+            await send_telegram_message(chat_id, reply_text)
+            save_telegram_log(
+                telegram_update_id=telegram_update_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+                chat_type="private",
+                message_text=reply_text,
+                direction="out",
+            )
+            return {"status": "ok", "action": "writing_usage"}
+
+        model_used, correction = await correct_writing(writing_text)
+        await send_telegram_message(chat_id, correction)
+        save_telegram_log(
+            telegram_update_id=telegram_update_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            chat_type="private",
+            message_text=correction,
+            direction="out",
+        )
+        return {"status": "ok", "action": "writing_corrected", "model": model_used}
+
+    model_used, assistant_reply = await general_assistant_reply(normalized)
+    await send_telegram_message(chat_id, assistant_reply)
     save_telegram_log(
         telegram_update_id=telegram_update_id,
         chat_id=chat_id,
         user_id=user_id,
         username=username,
         chat_type="private",
-        message_text=correction,
+        message_text=assistant_reply,
         direction="out",
     )
-    return {"status": "ok", "action": "writing_corrected", "model": model_used}
+    return {"status": "ok", "action": "assistant_reply", "model": model_used}
 
 
 async def handle_group_or_channel_message(
@@ -823,8 +870,7 @@ async def handle_group_or_channel_message(
     normalized = text.strip()
     if normalized.lower() == "/help":
         reply_text = (
-            "AGENTE 2026 Telegram activo.\n"
-            "Usa el chat privado para enviar writings y recibir correcciones."
+            'AGENTE 2026 Telegram activo.\nUsa el chat privado para hablar conmigo como asistente general.\nSi quieres corregir un writing, usa /writing seguido del texto.'
         )
         await send_telegram_message(chat_id, reply_text)
         save_telegram_log(
