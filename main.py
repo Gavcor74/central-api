@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -170,6 +171,41 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcriber_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                provider TEXT,
+                mode TEXT,
+                model TEXT,
+                language TEXT,
+                sample_rate INTEGER,
+                mime_type TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                stopped_at TEXT,
+                notes TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcriber_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                chunk_kind TEXT NOT NULL,
+                audio_b64 TEXT,
+                text_chunk TEXT,
+                transcript_text TEXT,
+                is_final INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES transcriber_sessions(session_id)
+            )
+            """
+        )
         connection.commit()
 
 
@@ -301,6 +337,70 @@ class TranscriberPlanResponse(BaseModel):
     has_api_key: bool
     recommended_mode: str
     next_steps: list[str]
+
+
+class TranscriberSessionStartRequest(BaseModel):
+    language: str | None = Field(default=None, description="Idioma esperado del audio en vivo")
+    sample_rate: int | None = Field(default=None, ge=8000, le=48000)
+    mime_type: str | None = Field(default="audio/webm", description="Tipo MIME de los chunks de audio")
+    notes: str | None = Field(default=None, description="Notas opcionales sobre la sesion")
+
+
+class TranscriberSessionStartResponse(BaseModel):
+    status: str
+    session_id: str
+    provider: str | None
+    mode: str | None
+    model: str | None
+    language: str | None
+    sample_rate: int | None
+    mime_type: str | None
+    created_at: str
+
+
+class TranscriberChunkRequest(BaseModel):
+    chunk_kind: str = Field(default="audio", description="audio, text o interim")
+    audio_b64: str | None = Field(default=None, description="Chunk de audio en base64")
+    text_chunk: str | None = Field(default=None, description="Texto reconocido parcial o de apoyo")
+    transcript_text: str | None = Field(default=None, description="Transcripcion ya generada para almacenar")
+    is_final: bool = Field(default=False, description="Marca el ultimo chunk de la sesion")
+
+
+class TranscriberChunkResponse(BaseModel):
+    status: str
+    session_id: str
+    sequence: int
+    chunk_kind: str
+    stored: bool
+    transcript_text: str | None
+    created_at: str
+
+
+class TranscriberSessionResponse(BaseModel):
+    status: str
+    session_id: str
+    provider: str | None
+    mode: str | None
+    model: str | None
+    language: str | None
+    sample_rate: int | None
+    mime_type: str | None
+    session_status: str
+    created_at: str
+    updated_at: str
+    stopped_at: str | None
+    chunk_count: int
+    latest_transcript: str | None
+    notes: str | None
+
+
+class TranscriberSessionStopResponse(BaseModel):
+    status: str
+    session_id: str
+    session_status: str
+    stopped_at: str
+    chunk_count: int
+    latest_transcript: str | None
 
 
 class TranscriptionRequest(BaseModel):
@@ -1023,6 +1123,197 @@ def transcriber_plan() -> TranscriberPlanResponse:
         has_api_key=bool(config["has_api_key"]),
         recommended_mode=recommended_mode,
         next_steps=next_steps,
+    )
+
+
+def _get_transcriber_session(session_id: str) -> sqlite3.Row:
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT session_id, provider, mode, model, language, sample_rate, mime_type,
+                   status, created_at, updated_at, stopped_at, notes
+            FROM transcriber_sessions
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Sesion de transcripcion no encontrada.")
+    return row
+
+
+def _count_transcriber_chunks(session_id: str) -> int:
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM transcriber_chunks WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    return int(row["count"] if row is not None else 0)
+
+
+def _latest_transcriber_transcript(session_id: str) -> str | None:
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT transcript_text
+            FROM transcriber_chunks
+            WHERE session_id = ? AND transcript_text IS NOT NULL AND transcript_text <> ''
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return str(row["transcript_text"])
+
+
+@app.post("/transcriber/live/start", response_model=TranscriberSessionStartResponse, tags=["transcriber"], dependencies=[Depends(require_api_key)])
+def transcriber_live_start(payload: TranscriberSessionStartRequest) -> TranscriberSessionStartResponse:
+    config = get_transcriber_config()
+    if not config["enabled"]:
+        raise HTTPException(status_code=503, detail="TRANSCRIBER_PROVIDER no esta configurado.")
+
+    session_id = uuid.uuid4().hex
+    created_at = utc_now()
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO transcriber_sessions (
+                session_id, provider, mode, model, language, sample_rate, mime_type,
+                status, created_at, updated_at, stopped_at, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                config["provider"],
+                config["mode"],
+                config["model"],
+                payload.language,
+                payload.sample_rate,
+                payload.mime_type,
+                "live",
+                created_at,
+                created_at,
+                None,
+                payload.notes,
+            ),
+        )
+        connection.commit()
+
+    return TranscriberSessionStartResponse(
+        status="ok",
+        session_id=session_id,
+        provider=config["provider"],
+        mode=config["mode"],
+        model=config["model"],
+        language=payload.language,
+        sample_rate=payload.sample_rate,
+        mime_type=payload.mime_type,
+        created_at=created_at,
+    )
+
+
+@app.post("/transcriber/live/{session_id}/chunk", response_model=TranscriberChunkResponse, tags=["transcriber"], dependencies=[Depends(require_api_key)])
+def transcriber_live_chunk(session_id: str, payload: TranscriberChunkRequest) -> TranscriberChunkResponse:
+    session = _get_transcriber_session(session_id)
+    if str(session["status"]) == "stopped":
+        raise HTTPException(status_code=409, detail="La sesion ya esta detenida.")
+
+    chunk_kind = payload.chunk_kind.strip().lower()
+    if chunk_kind not in {"audio", "text", "interim"}:
+        raise HTTPException(status_code=400, detail="chunk_kind debe ser audio, text o interim.")
+    if not payload.audio_b64 and not payload.text_chunk and not payload.transcript_text:
+        raise HTTPException(status_code=400, detail="Debes enviar audio_b64, text_chunk o transcript_text.")
+
+    created_at = utc_now()
+    with get_db_connection() as connection:
+        sequence_row = connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM transcriber_chunks WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        sequence = int(sequence_row["next_sequence"] if sequence_row is not None else 1)
+        connection.execute(
+            """
+            INSERT INTO transcriber_chunks (
+                session_id, sequence, chunk_kind, audio_b64, text_chunk, transcript_text,
+                is_final, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                sequence,
+                chunk_kind,
+                payload.audio_b64,
+                payload.text_chunk,
+                payload.transcript_text,
+                1 if payload.is_final else 0,
+                created_at,
+            ),
+        )
+        connection.execute(
+            "UPDATE transcriber_sessions SET updated_at = ? WHERE session_id = ?",
+            (created_at, session_id),
+        )
+        connection.commit()
+
+    transcript_text = payload.transcript_text or payload.text_chunk
+    return TranscriberChunkResponse(
+        status="ok",
+        session_id=session_id,
+        sequence=sequence,
+        chunk_kind=chunk_kind,
+        stored=True,
+        transcript_text=transcript_text,
+        created_at=created_at,
+    )
+
+
+@app.get("/transcriber/live/{session_id}", response_model=TranscriberSessionResponse, tags=["transcriber"], dependencies=[Depends(require_api_key)])
+def transcriber_live_session(session_id: str) -> TranscriberSessionResponse:
+    session = _get_transcriber_session(session_id)
+    chunk_count = _count_transcriber_chunks(session_id)
+    latest_transcript = _latest_transcriber_transcript(session_id)
+    return TranscriberSessionResponse(
+        status="ok",
+        session_id=str(session["session_id"]),
+        provider=session["provider"],
+        mode=session["mode"],
+        model=session["model"],
+        language=session["language"],
+        sample_rate=session["sample_rate"],
+        mime_type=session["mime_type"],
+        session_status=str(session["status"]),
+        created_at=str(session["created_at"]),
+        updated_at=str(session["updated_at"]),
+        stopped_at=session["stopped_at"],
+        chunk_count=chunk_count,
+        latest_transcript=latest_transcript,
+        notes=session["notes"],
+    )
+
+
+@app.post("/transcriber/live/{session_id}/stop", response_model=TranscriberSessionStopResponse, tags=["transcriber"], dependencies=[Depends(require_api_key)])
+def transcriber_live_stop(session_id: str) -> TranscriberSessionStopResponse:
+    session = _get_transcriber_session(session_id)
+    if str(session["status"]) == "stopped":
+        stopped_at = str(session["stopped_at"] or utc_now())
+    else:
+        stopped_at = utc_now()
+        with get_db_connection() as connection:
+            connection.execute(
+                "UPDATE transcriber_sessions SET status = ?, stopped_at = ?, updated_at = ? WHERE session_id = ?",
+                ("stopped", stopped_at, stopped_at, session_id),
+            )
+            connection.commit()
+
+    return TranscriberSessionStopResponse(
+        status="ok",
+        session_id=session_id,
+        session_status="stopped",
+        stopped_at=stopped_at,
+        chunk_count=_count_transcriber_chunks(session_id),
+        latest_transcript=_latest_transcriber_transcript(session_id),
     )
 
 
