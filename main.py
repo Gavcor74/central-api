@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from services.auth import get_auth_config, require_api_key
 from services.notion_mcp import get_notion_mcp_config
 from services.openclaw import get_openclaw_config
 from services.transcriber import get_transcriber_config
@@ -57,6 +58,7 @@ NOTION_MCP_API_KEY = os.getenv("NOTION_MCP_API_KEY", "")
 TRANSCRIBER_PROVIDER = os.getenv("TRANSCRIBER_PROVIDER", "")
 TRANSCRIBER_MODEL = os.getenv("TRANSCRIBER_MODEL", "")
 TRANSCRIBER_API_KEY = os.getenv("TRANSCRIBER_API_KEY", "")
+API_KEY = os.getenv("API_KEY", "")
 
 
 WRITING_CORRECTION_PROMPT = """
@@ -176,6 +178,11 @@ class HealthResponse(BaseModel):
     ollama_base_url: str
     default_model: str | None
     timestamp: str
+
+
+class AuthConfigResponse(BaseModel):
+    enabled: bool
+    has_api_key: bool
 
 
 class ChatRequest(BaseModel):
@@ -812,7 +819,7 @@ async def models() -> dict[str, Any]:
     }
 
 
-@app.post("/chat", response_model=ChatResponse, tags=["ollama"])
+@app.post("/chat", response_model=ChatResponse, tags=["ollama"], dependencies=[Depends(require_api_key)])
 async def chat(payload: ChatRequest) -> ChatResponse:
     selected_model, assistant_message = await generate_with_ollama(
         message=payload.message,
@@ -839,7 +846,7 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     )
 
 
-@app.post("/memory/save", response_model=MemoryItem, tags=["memory"])
+@app.post("/memory/save", response_model=MemoryItem, tags=["memory"], dependencies=[Depends(require_api_key)])
 def memory_save(payload: MemorySaveRequest) -> MemoryItem:
     created_at = utc_now()
     with get_db_connection() as connection:
@@ -907,6 +914,12 @@ def tools_echo(payload: EchoRequest) -> dict[str, str]:
     }
 
 
+@app.get("/auth/config", response_model=AuthConfigResponse, tags=["security"])
+def auth_config() -> AuthConfigResponse:
+    config = get_auth_config()
+    return AuthConfigResponse(**config)
+
+
 @app.get("/openclaw/config", response_model=OpenClawConfigResponse, tags=["openclaw"])
 def openclaw_config() -> OpenClawConfigResponse:
     config = get_openclaw_config()
@@ -925,7 +938,7 @@ def transcriber_config() -> TranscriberConfigResponse:
     return TranscriberConfigResponse(**config)
 
 
-@app.post("/transcriber/transcribe", tags=["transcriber"])
+@app.post("/transcriber/transcribe", tags=["transcriber"], dependencies=[Depends(require_api_key)])
 def transcriber_transcribe(payload: TranscriptionRequest) -> dict[str, Any]:
     config = get_transcriber_config()
     if not config["enabled"]:
@@ -956,6 +969,7 @@ def telegram_config() -> TelegramConfigResponse:
     "/telegram/channel/content",
     response_model=TelegramChannelContentResponse,
     tags=["telegram"],
+    dependencies=[Depends(require_api_key)],
 )
 async def telegram_channel_content(
     payload: TelegramChannelContentRequest,
@@ -1002,7 +1016,7 @@ async def notion_ideas(status: str = "Idea", limit: int = 10) -> list[NotionIdea
     return await fetch_notion_ideas(status=status, limit=safe_limit)
 
 
-@app.post("/notion/ideas/drafts", response_model=list[NotionDraftItem], tags=["notion"])
+@app.post("/notion/ideas/drafts", response_model=list[NotionDraftItem], tags=["notion"], dependencies=[Depends(require_api_key)])
 async def notion_ideas_drafts(payload: NotionDraftsRequest) -> list[NotionDraftItem]:
     ideas = await fetch_notion_ideas(status=payload.status, limit=payload.limit)
     drafts: list[NotionDraftItem] = []

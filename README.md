@@ -24,6 +24,10 @@ La v1 actual ya trae una API útil para arrancar:
 - `POST /memory/save`
 - `GET /memory/list`
 - `POST /tools/echo`
+- `GET /auth/config`
+- `GET /openclaw/config`
+- `GET /notion/mcp/config`
+- `GET /transcriber/config`
 - `GET /telegram/config`
 - `POST /telegram/webhook`
 - `POST /telegram/channel/content`
@@ -80,6 +84,7 @@ Variables actuales:
 - `OLLAMA_MODEL`
 - `OLLAMA_TIMEOUT_SECONDS`
 - `CENTRAL_DB_PATH`
+- `API_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `TELEGRAM_ALLOWED_ADMIN_IDS`
@@ -95,6 +100,22 @@ Variables actuales:
 - `TRANSCRIBER_PROVIDER`
 - `TRANSCRIBER_MODEL`
 - `TRANSCRIBER_API_KEY`
+
+## Seguridad basica
+
+Si defines `API_KEY`, las rutas de escritura y publicacion quedaran protegidas con la cabecera `X-API-Key`.
+
+Rutas protegidas cuando exista clave:
+
+- `POST /chat`
+- `POST /memory/save`
+- `POST /telegram/channel/content`
+- `POST /notion/ideas/drafts`
+- `POST /transcriber/transcribe`
+
+Notas:
+
+- `POST /telegram/webhook` sigue abierto para Telegram, pero valida su propio `TELEGRAM_WEBHOOK_SECRET`.
 
 ## Despliegue en EasyPanel
 
