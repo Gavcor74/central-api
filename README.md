@@ -26,6 +26,7 @@ La v1 actual ya trae una API útil para arrancar:
 - `POST /tools/echo`
 - `GET /auth/config`
 - `GET /openclaw/config`
+- `GET /openclaw/plan`
 - `GET /notion/mcp/config`
 - `GET /transcriber/config`
 - `GET /telegram/config`

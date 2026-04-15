@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from contextlib import asynccontextmanager
@@ -270,6 +271,14 @@ class OpenClawConfigResponse(BaseModel):
     has_api_key: bool
 
 
+class OpenClawPlanResponse(BaseModel):
+    enabled: bool
+    base_url: str | None
+    has_api_key: bool
+    recommended_mode: str
+    next_steps: list[str]
+
+
 class NotionMcpConfigResponse(BaseModel):
     enabled: bool
     url: str | None
@@ -317,7 +326,17 @@ async def fetch_ollama_models() -> list[dict[str, Any]]:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
         response.raise_for_status()
-        payload = response.json()
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            snippet = response.text[:200].replace("\n", " ").strip()
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Ollama devolvio una respuesta no JSON en /api/tags. "
+                    f"Snippet: {snippet}"
+                ),
+            ) from exc
         return payload.get("models", [])
 
 
@@ -924,6 +943,34 @@ def auth_config() -> AuthConfigResponse:
 def openclaw_config() -> OpenClawConfigResponse:
     config = get_openclaw_config()
     return OpenClawConfigResponse(**config)
+
+
+@app.get("/openclaw/plan", response_model=OpenClawPlanResponse, tags=["openclaw"])
+def openclaw_plan() -> OpenClawPlanResponse:
+    config = get_openclaw_config()
+    base_url = config["base_url"]
+    enabled = bool(config["enabled"])
+    if enabled:
+        recommended_mode = "vps_gateway"
+        next_steps = [
+            "OpenClaw ya puede apuntar a tu VPS.",
+            "Mantén Ollama en la URL interna que ya validaste.",
+            "Cuando quieras, conectamos canales y automatizaciones encima.",
+        ]
+    else:
+        recommended_mode = "needs_configuration"
+        next_steps = [
+            "Configura OPENCLAW_BASE_URL en EasyPanel.",
+            "Decide si OpenClaw vivira en el VPS o se usara solo como gateway externo.",
+            "Cuando el base_url exista, podras conectarlo al resto del sistema.",
+        ]
+    return OpenClawPlanResponse(
+        enabled=enabled,
+        base_url=base_url,
+        has_api_key=bool(config["has_api_key"]),
+        recommended_mode=recommended_mode,
+        next_steps=next_steps,
+    )
 
 
 @app.get("/notion/mcp/config", response_model=NotionMcpConfigResponse, tags=["notion"])
