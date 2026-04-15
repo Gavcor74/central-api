@@ -29,6 +29,7 @@ La v1 actual ya trae una API útil para arrancar:
 - `GET /openclaw/plan`
 - `GET /notion/mcp/config`
 - `GET /transcriber/config`
+- `GET /transcriber/plan`
 - `GET /telegram/config`
 - `POST /telegram/webhook`
 - `POST /telegram/channel/content`

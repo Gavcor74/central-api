@@ -292,6 +292,15 @@ class TranscriberConfigResponse(BaseModel):
     has_api_key: bool
 
 
+class TranscriberPlanResponse(BaseModel):
+    enabled: bool
+    provider: str | None
+    model: str | None
+    has_api_key: bool
+    recommended_mode: str
+    next_steps: list[str]
+
+
 class TranscriptionRequest(BaseModel):
     audio_source: str = Field(..., min_length=3, description="Ruta, URL o identificador del audio")
     language: str | None = Field(default=None, description="Idioma esperado del audio")
@@ -983,6 +992,36 @@ def notion_mcp_config() -> NotionMcpConfigResponse:
 def transcriber_config() -> TranscriberConfigResponse:
     config = get_transcriber_config()
     return TranscriberConfigResponse(**config)
+
+
+@app.get("/transcriber/plan", response_model=TranscriberPlanResponse, tags=["transcriber"])
+def transcriber_plan() -> TranscriberPlanResponse:
+    config = get_transcriber_config()
+    enabled = bool(config["enabled"])
+    provider = config["provider"]
+    model = config["model"]
+    if enabled:
+        recommended_mode = "vps_worker"
+        next_steps = [
+            "El transcriptor ya puede vivir en el VPS como servicio aparte.",
+            "Puedes usar Whisper, faster-whisper o un proveedor externo.",
+            "Cuando tengas el backend elegido, conectamos /transcriber/transcribe.",
+        ]
+    else:
+        recommended_mode = "needs_configuration"
+        next_steps = [
+            "Configura TRANSCRIBER_PROVIDER en EasyPanel.",
+            "Decide si el transcriptor sera local (Whisper) o externo.",
+            "Cuando haya provider, podremos implementar la ruta de transcripcion real.",
+        ]
+    return TranscriberPlanResponse(
+        enabled=enabled,
+        provider=provider,
+        model=model,
+        has_api_key=bool(config["has_api_key"]),
+        recommended_mode=recommended_mode,
+        next_steps=next_steps,
+    )
 
 
 @app.post("/transcriber/transcribe", tags=["transcriber"], dependencies=[Depends(require_api_key)])
