@@ -288,6 +288,7 @@ class NotionMcpConfigResponse(BaseModel):
 class TranscriberConfigResponse(BaseModel):
     enabled: bool
     provider: str | None
+    mode: str | None
     model: str | None
     has_api_key: bool
 
@@ -295,6 +296,7 @@ class TranscriberConfigResponse(BaseModel):
 class TranscriberPlanResponse(BaseModel):
     enabled: bool
     provider: str | None
+    mode: str | None
     model: str | None
     has_api_key: bool
     recommended_mode: str
