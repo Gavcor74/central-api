@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -15,6 +16,9 @@ DB_PATH = Path(os.getenv("CENTRAL_DB_PATH", BASE_DIR / "central.db"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "")
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://127.0.0.1:18789").rstrip("/")
+OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "")
+OPENCLAW_TIMEOUT_SECONDS = float(os.getenv("OPENCLAW_TIMEOUT_SECONDS", "15"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 TELEGRAM_ALLOWED_ADMIN_IDS = {
@@ -25,6 +29,10 @@ CORRECTOR_MODEL = os.getenv("CORRECTOR_MODEL", DEFAULT_MODEL)
 NOTION_API_TOKEN = os.getenv("NOTION_API_TOKEN", "")
 NOTION_CONTENT_DB_ID = os.getenv("NOTION_CONTENT_DB_ID", "")
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
+BASEROW_BASE_URL = os.getenv("BASEROW_BASE_URL", "https://api.baserow.io").rstrip("/")
+BASEROW_API_TOKEN = os.getenv("BASEROW_API_TOKEN", "")
+BASEROW_TABLE_ID = os.getenv("BASEROW_TABLE_ID", "")
+BASEROW_USER_FIELD_NAMES = os.getenv("BASEROW_USER_FIELD_NAMES", "true").lower() == "true"
 
 
 WRITING_CORRECTION_PROMPT = """
@@ -87,6 +95,38 @@ Si falta contexto, usa la idea principal y conviertela en un borrador util, brev
 """.strip()
 
 
+EMAIL_CLASSIFICATION_PROMPT = """
+Actuas como clasificador de correos para una bandeja de trabajo.
+
+Tu trabajo es:
+- resumir el correo en espanol en 1 o 2 frases
+- clasificarlo en una sola categoria
+- indicar tu confianza entre 0 y 1
+- marcar si necesita revision humana
+
+Categorias permitidas:
+- newsletter
+- factura
+- cliente
+- spam
+- alerta
+- otro
+
+Devuelve SOLO JSON valido con este formato exacto:
+{
+  "summary": "resumen corto",
+  "category": "newsletter|factura|cliente|spam|alerta|otro",
+  "confidence": 0.0,
+  "needs_review": false
+}
+
+Reglas:
+- no devuelvas texto extra
+- si dudas entre varias categorias, usa "otro"
+- si la confianza es menor de 0.7, needs_review debe ser true
+""".strip()
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -143,6 +183,46 @@ class HealthResponse(BaseModel):
     service: str
     ollama_base_url: str
     default_model: str | None
+    timestamp: str
+
+
+class OpenClawConfigResponse(BaseModel):
+    enabled: bool
+    base_url: str
+    has_token: bool
+    timeout_seconds: float
+    control_ui_url: str
+
+
+class OpenClawHealthResponse(BaseModel):
+    status: str
+    service: str
+    openclaw_base_url: str
+    gateway_status: str
+    detail: str | None = None
+    timestamp: str
+
+
+class OpenClawPlanRequest(BaseModel):
+    goal: str = Field(..., min_length=3, description="Objetivo o tarea que quieres llevar a OpenClaw")
+    context: str | None = Field(
+        default=None,
+        description="Contexto adicional para acompañar el objetivo",
+    )
+    preferred_agent_id: str = Field(default="main", description="Agente preferido dentro de OpenClaw")
+    preferred_model: str | None = Field(default=None, description="Modelo sugerido si quieres orientar la sesion")
+
+
+class OpenClawPlanResponse(BaseModel):
+    status: str
+    gateway_live: bool
+    openclaw_base_url: str
+    control_ui_url: str
+    preferred_agent_id: str
+    preferred_model: str | None = None
+    execution_mode: str
+    next_step: str
+    prompt: str
     timestamp: str
 
 
@@ -216,6 +296,39 @@ class TelegramChannelContentResponse(BaseModel):
     channel_id: str | None = None
     telegram_message_id: int | None = None
     created_at: str
+
+
+class EmailProcessRequest(BaseModel):
+    subject: str = Field(default="", description="Asunto del correo")
+    sender: str = Field(..., min_length=3, description="Remitente del correo")
+    received_date: str | None = Field(default=None, description="Fecha de recepcion del correo")
+    body: str = Field(..., min_length=1, description="Cuerpo del correo")
+    message_id: str | None = Field(default=None, description="ID unico del correo si existe")
+    save_to_baserow: bool = Field(default=True, description="Si es true, intenta guardar el resultado en Baserow")
+    model: str | None = Field(default=None, description="Modelo opcional de Ollama")
+
+
+class EmailProcessResponse(BaseModel):
+    status: str
+    sender: str
+    subject: str
+    summary: str
+    category: str
+    confidence: float
+    needs_review: bool
+    model: str | None = None
+    rule_applied: str | None = None
+    saved_to_baserow: bool
+    baserow_row_id: int | None = None
+    created_at: str
+
+
+class BaserowConfigResponse(BaseModel):
+    enabled: bool
+    base_url: str
+    has_token: bool
+    table_id: str | None
+    user_field_names: bool
 
 
 class NotionConfigResponse(BaseModel):
@@ -296,6 +409,174 @@ async def generate_with_ollama(
 
     data = response.json()
     return selected_model, data.get("response", "")
+
+
+def normalize_email_category(value: str | None) -> str:
+    allowed = {"newsletter", "factura", "cliente", "spam", "alerta", "otro"}
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in allowed else "otro"
+
+
+def rule_based_email_classification(subject: str, sender: str, body: str) -> dict[str, Any] | None:
+    subject_lower = subject.lower()
+    sender_lower = sender.lower()
+    body_lower = body.lower()
+    combined = f"{subject_lower}\n{sender_lower}\n{body_lower}"
+
+    rules: list[tuple[str, tuple[str, ...], str, float, bool, str]] = [
+        (
+            "newsletter_linkedin",
+            ("linkedin.com", "linkedin", "jobs-noreply@linkedin", "news@linkedin"),
+            "newsletter",
+            0.99,
+            False,
+            "Correo tipo newsletter o notificacion de LinkedIn.",
+        ),
+        (
+            "factura_keywords",
+            ("invoice", "factura", "receipt", "payment", "paypal", "stripe"),
+            "factura",
+            0.92,
+            False,
+            "Correo relacionado con pago, factura o recibo.",
+        ),
+        (
+            "alerta_keywords",
+            ("alert", "warning", "security", "critical", "incidencia", "error"),
+            "alerta",
+            0.88,
+            False,
+            "Correo de alerta tecnica o aviso importante.",
+        ),
+        (
+            "spam_keywords",
+            ("unsubscribe", "buy now", "limited time", "oferta exclusiva", "gana dinero"),
+            "spam",
+            0.82,
+            True,
+            "Correo promocional o sospechoso.",
+        ),
+    ]
+
+    for rule_name, patterns, category, confidence, needs_review, summary in rules:
+        if any(pattern in combined for pattern in patterns):
+            return {
+                "summary": summary,
+                "category": category,
+                "confidence": confidence,
+                "needs_review": needs_review,
+                "rule_applied": rule_name,
+            }
+
+    if any(token in sender_lower for token in ("client", "cliente", "@empresa", "@customer")):
+        return {
+            "summary": "Correo probablemente relacionado con un cliente o contacto directo.",
+            "category": "cliente",
+            "confidence": 0.75,
+            "needs_review": True,
+            "rule_applied": "client_sender_hint",
+        }
+
+    return None
+
+
+async def classify_email_with_ollama(payload: EmailProcessRequest) -> tuple[str, dict[str, Any]]:
+    message = (
+        f"Subject: {payload.subject or 'Sin asunto'}\n"
+        f"Sender: {payload.sender}\n"
+        f"Received Date: {payload.received_date or 'Sin fecha'}\n\n"
+        f"Body:\n{payload.body.strip()}"
+    )
+    model_used, raw_response = await generate_with_ollama(
+        message=message,
+        model=payload.model,
+        system_prompt=EMAIL_CLASSIFICATION_PROMPT,
+    )
+
+    try:
+        parsed = json.loads(raw_response)
+    except json.JSONDecodeError:
+        parsed = {
+            "summary": raw_response.strip()[:400] or "No se pudo resumir el correo correctamente.",
+            "category": "otro",
+            "confidence": 0.2,
+            "needs_review": True,
+        }
+
+    result = {
+        "summary": str(parsed.get("summary", "")).strip() or "Sin resumen",
+        "category": normalize_email_category(parsed.get("category")),
+        "confidence": max(0.0, min(float(parsed.get("confidence", 0.0)), 1.0)),
+        "needs_review": bool(parsed.get("needs_review", True)),
+        "rule_applied": None,
+    }
+    if result["confidence"] < 0.7:
+        result["needs_review"] = True
+    return model_used, result
+
+
+async def save_email_to_baserow(payload: dict[str, Any]) -> dict[str, Any]:
+    if not BASEROW_API_TOKEN or not BASEROW_TABLE_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="BASEROW_API_TOKEN o BASEROW_TABLE_ID no estan configurados.",
+        )
+
+    headers = {
+        "Authorization": f"Token {BASEROW_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    params = {"user_field_names": str(BASEROW_USER_FIELD_NAMES).lower()}
+    url = f"{BASEROW_BASE_URL}/api/database/rows/table/{BASEROW_TABLE_ID}/"
+
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.post(url, headers=headers, params=params, json=payload)
+            response.raise_for_status()
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=503, detail="No se pudo conectar con Baserow.") from exc
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Baserow devolvio un error: {exc.response.text}",
+            ) from exc
+    return response.json()
+
+
+async def fetch_openclaw_health() -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=OPENCLAW_TIMEOUT_SECONDS) as client:
+        try:
+            response = await client.get(f"{OPENCLAW_BASE_URL}/health")
+            response.raise_for_status()
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No se pudo conectar con OpenClaw en {OPENCLAW_BASE_URL}.",
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"OpenClaw devolvio un error: {exc.response.text}",
+            ) from exc
+    return response.json()
+
+
+def build_openclaw_plan_prompt(payload: OpenClawPlanRequest) -> str:
+    parts = [
+        "Objetivo principal:",
+        payload.goal.strip(),
+    ]
+    if payload.context:
+        parts.extend(["", "Contexto adicional:", payload.context.strip()])
+    if payload.preferred_model:
+        parts.extend(["", f"Modelo sugerido: {payload.preferred_model.strip()}"])
+    parts.extend(
+        [
+            "",
+            "Trabaja paso a paso y prioriza una salida accionable.",
+        ]
+    )
+    return "\n".join(parts)
 
 
 async def telegram_api_request(method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -725,6 +1006,113 @@ def health() -> HealthResponse:
         ollama_base_url=OLLAMA_BASE_URL,
         default_model=DEFAULT_MODEL or None,
         timestamp=utc_now(),
+    )
+
+
+@app.get("/openclaw/config", response_model=OpenClawConfigResponse, tags=["openclaw"])
+def openclaw_config() -> OpenClawConfigResponse:
+    return OpenClawConfigResponse(
+        enabled=bool(OPENCLAW_BASE_URL),
+        base_url=OPENCLAW_BASE_URL,
+        has_token=bool(OPENCLAW_TOKEN),
+        timeout_seconds=OPENCLAW_TIMEOUT_SECONDS,
+        control_ui_url=OPENCLAW_BASE_URL or "",
+    )
+
+
+@app.get("/baserow/config", response_model=BaserowConfigResponse, tags=["baserow"])
+def baserow_config() -> BaserowConfigResponse:
+    return BaserowConfigResponse(
+        enabled=bool(BASEROW_API_TOKEN and BASEROW_TABLE_ID),
+        base_url=BASEROW_BASE_URL,
+        has_token=bool(BASEROW_API_TOKEN),
+        table_id=BASEROW_TABLE_ID or None,
+        user_field_names=BASEROW_USER_FIELD_NAMES,
+    )
+
+
+@app.get("/openclaw/health", response_model=OpenClawHealthResponse, tags=["openclaw"])
+async def openclaw_health() -> OpenClawHealthResponse:
+    health_payload = await fetch_openclaw_health()
+    return OpenClawHealthResponse(
+        status="ok",
+        service="API CENTRAL",
+        openclaw_base_url=OPENCLAW_BASE_URL,
+        gateway_status=str(health_payload.get("status", "unknown")),
+        detail=health_payload.get("detail"),
+        timestamp=utc_now(),
+    )
+
+
+@app.post("/openclaw/plan", response_model=OpenClawPlanResponse, tags=["openclaw"])
+async def openclaw_plan(payload: OpenClawPlanRequest) -> OpenClawPlanResponse:
+    gateway_live = False
+    try:
+        health_payload = await fetch_openclaw_health()
+        gateway_live = bool(health_payload.get("ok")) or str(health_payload.get("status", "")).lower() == "live"
+    except HTTPException:
+        gateway_live = False
+
+    return OpenClawPlanResponse(
+        status="ok",
+        gateway_live=gateway_live,
+        openclaw_base_url=OPENCLAW_BASE_URL,
+        control_ui_url=OPENCLAW_BASE_URL,
+        preferred_agent_id=payload.preferred_agent_id,
+        preferred_model=payload.preferred_model,
+        execution_mode="manual_handoff_to_openclaw",
+        next_step=(
+            "Abrir OpenClaw Control y pegar este prompt en el agente indicado."
+            if gateway_live
+            else "Levantar o revisar OpenClaw antes de usar este prompt."
+        ),
+        prompt=build_openclaw_plan_prompt(payload),
+        timestamp=utc_now(),
+    )
+
+
+@app.post("/email/process", response_model=EmailProcessResponse, tags=["email"])
+async def email_process(payload: EmailProcessRequest) -> EmailProcessResponse:
+    rule_result = rule_based_email_classification(payload.subject, payload.sender, payload.body)
+    model_used: str | None = None
+
+    if rule_result:
+        classification = rule_result
+    else:
+        model_used, classification = await classify_email_with_ollama(payload)
+
+    baserow_row_id: int | None = None
+    saved_to_baserow = False
+    if payload.save_to_baserow and BASEROW_API_TOKEN and BASEROW_TABLE_ID:
+        baserow_payload = {
+            "Subject": payload.subject or "",
+            "Sender": payload.sender,
+            "Received Date": payload.received_date or utc_now(),
+            "Summary": classification["summary"],
+            "Category": classification["category"],
+            "Confidence": classification["confidence"],
+            "Needs Review": classification["needs_review"],
+            "Message ID": payload.message_id or "",
+            "Raw Preview": payload.body.strip()[:500],
+            "Status": "processed",
+        }
+        row = await save_email_to_baserow(baserow_payload)
+        baserow_row_id = row.get("id")
+        saved_to_baserow = True
+
+    return EmailProcessResponse(
+        status="ok",
+        sender=payload.sender,
+        subject=payload.subject,
+        summary=classification["summary"],
+        category=classification["category"],
+        confidence=classification["confidence"],
+        needs_review=classification["needs_review"],
+        model=model_used,
+        rule_applied=classification.get("rule_applied"),
+        saved_to_baserow=saved_to_baserow,
+        baserow_row_id=baserow_row_id,
+        created_at=utc_now(),
     )
 
 

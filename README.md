@@ -26,6 +26,11 @@ La API ya incluye:
 - `POST /memory/save`
 - `GET /memory/list`
 - `POST /tools/echo`
+- `GET /openclaw/config`
+- `GET /openclaw/health`
+- `POST /openclaw/plan`
+- `GET /baserow/config`
+- `POST /email/process`
 - `GET /telegram/config`
 - `POST /telegram/webhook`
 - `POST /telegram/channel/content`
@@ -49,6 +54,24 @@ Ademas, para modo local:
 - `OLLAMA_TIMEOUT_SECONDS`
   - timeout para llamadas a Ollama
   - valor por defecto: `60`
+- `OPENCLAW_BASE_URL`
+  - URL base del gateway de OpenClaw
+  - valor por defecto: `http://127.0.0.1:18789`
+- `OPENCLAW_TOKEN`
+  - token opcional del gateway de OpenClaw
+- `OPENCLAW_TIMEOUT_SECONDS`
+  - timeout para comprobar el estado de OpenClaw
+  - valor por defecto: `15`
+- `BASEROW_BASE_URL`
+  - URL base de tu Baserow
+  - valor por defecto: `https://api.baserow.io`
+- `BASEROW_API_TOKEN`
+  - token de API para crear filas en Baserow
+- `BASEROW_TABLE_ID`
+  - id de la tabla donde quieres guardar los correos procesados
+- `BASEROW_USER_FIELD_NAMES`
+  - si es `true`, la API usa los nombres visibles de las columnas
+  - valor por defecto: `true`
 - `CENTRAL_DB_PATH`
   - ruta del archivo SQLite
   - valor por defecto: `./central.db`
@@ -162,6 +185,32 @@ Invoke-RestMethod `
   -Body '{"topic":"3 ways to sound more natural in english","objective":"crear un post corto y muy publicable","publish":true}'
 ```
 
+Comprobar OpenClaw:
+
+```powershell
+Invoke-RestMethod http://localhost:8000/openclaw/health
+```
+
+Preparar un handoff para OpenClaw:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8000/openclaw/plan `
+  -ContentType "application/json" `
+  -Body '{"goal":"analiza una idea de automatizacion para Quickingles","context":"quiero una propuesta corta y accionable","preferred_agent_id":"main"}'
+```
+
+Procesar un correo y guardarlo en Baserow:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8000/email/process `
+  -ContentType "application/json" `
+  -Body '{"subject":"Monthly digest from LinkedIn","sender":"news@linkedin.com","received_date":"2026-04-18T09:15:00Z","body":"Here is your weekly digest with updates and recommendations.","message_id":"msg-001","save_to_baserow":true}'
+```
+
 ## Despliegue en Easy Panel
 
 La imagen actual del proyecto es valida para un servicio Docker sencillo.
@@ -184,7 +233,56 @@ Ejemplo si Ollama vive en otra maquina o servicio:
 - `Ollama` como backend de modelos
 - `SQLite` como memoria inicial
 - `Telegram Webhook` como primer canal real
+- `OpenClaw` como capa opcional y aislada de handoff
 - `Dockerfile` listo para despliegue
+
+## Arquitectura operativa actual
+
+Regla simple:
+
+- `VPS` = estable y publico
+- `Sobremesa` = experimental y local
+
+Reparto actual:
+
+- `API CENTRAL` en el VPS
+  - hub del sistema
+  - recibe mensajes
+  - coordina
+  - guarda estado
+  - expone endpoints publicos
+  - soportara la mini web futura tipo ChatGPT
+- `Telegram` como canal principal
+  - puerta movil del sistema
+  - acceso rapido sin abrir otra interfaz
+- `Ollama`
+  - motor que responde
+  - puede vivir en el entorno que mejor encaje operativamente
+- `OpenClaw` en sobremesa
+  - operario experimental
+  - pruebas agentic
+  - automatizaciones experimentales
+  - tareas con mas contexto local o herramientas de escritorio
+- `Baserow`
+  - destino operativo para correos procesados y clasificados
+
+Flujo principal actual:
+
+- `Telegram -> API CENTRAL -> Ollama`
+
+Flujo opcional:
+
+- `API CENTRAL -> OpenClaw` solo si OpenClaw esta disponible
+- `Email -> API CENTRAL -> Ollama -> Baserow`
+
+Decision importante:
+
+- `OpenClaw` no es nucleo de produccion por ahora
+- produccion no debe depender de `OpenClaw`
+- no mover `OpenClaw` al VPS por obligacion
+- no borrar `OpenClaw` del sobremesa mientras siga siendo util para pruebas
+- el bloque actual de Telegram del repo oficial se mantiene intacto
+- el procesamiento de correo empieza por reglas + Ollama, sin borrar ni archivar automaticamente
 
 ## AGENTE 2026 Telegram v1
 
@@ -302,16 +400,16 @@ Objetivo:
 
 - mover partes al VPS o a otro servidor solo cuando el flujo ya este validado
 
-## Arquitectura objetivo: OpenClaw como nucleo
+## Vision futura posible
 
-La vision actual del proyecto queda asi:
+La vision a largo plazo puede evolucionar, pero sin forzar la arquitectura actual antes de validarla:
 
-- `OpenClaw` = nucleo del agente
-- `Telegram` = canal de entrada y salida
-- `Ollama` = motor de lenguaje local
-- memoria interna nativa de `OpenClaw` = memoria tecnica interna
-- `NocoDB` = supervision editorial del contenido del canal
-- `n8n` = capa de automatizacion y ejecucion de flujos
+- `OpenClaw` podria ganar peso si demuestra valor real
+- `NocoDB` puede servir como supervision editorial
+- `n8n` puede cubrir automatizaciones y ejecucion de flujos
+- `Notion` puede seguir como fuente editorial acotada
+
+Hasta que eso se valide, la arquitectura operativa manda sobre la vision.
 
 ### Reparto de papeles
 
@@ -319,10 +417,10 @@ La vision actual del proyecto queda asi:
 
 Papel:
 
-- cerebro del agente
-- orquestacion de herramientas
-- contexto conversacional
-- agente principal sobre tu PC
+- operario experimental
+- orquestacion de pruebas
+- automatizaciones avanzadas no criticas
+- agente opcional sobre tu PC
 
 #### Telegram
 
@@ -346,8 +444,8 @@ Papel:
 
 Papel:
 
-- opcion tecnica futura si alguna parte propia necesita persistencia separada
-- no es la memoria tecnica principal mientras `OpenClaw` ya cubra esa capa
+- persistencia simple propia de `API CENTRAL`
+- memoria ligera e historial tecnico del hub
 
 #### NocoDB
 
@@ -378,9 +476,13 @@ El sistema deberia permitir:
 5. que el agente use memoria interna para no perder contexto
 6. que mas adelante el agente pueda preparar workflows en `n8n`
 
+Sin romper esta regla:
+
+- si `OpenClaw` no esta disponible, el sistema principal sigue funcionando
+
 ## Notion como fuente editorial
 
-La estrategia actual usa `Notion` como fuente de ideas y deja `OpenClaw` como nucleo del agente.
+La estrategia actual usa `Notion` como fuente de ideas y deja `OpenClaw` como capa opcional, no como nucleo obligatorio.
 
 Flujo recomendado:
 
