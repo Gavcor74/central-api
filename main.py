@@ -417,6 +417,11 @@ def normalize_email_category(value: str | None) -> str:
     return normalized if normalized in allowed else "otro"
 
 
+def compact_error_text(value: str, limit: int = 300) -> str:
+    cleaned = " ".join(value.split())
+    return cleaned[:limit]
+
+
 def rule_based_email_classification(subject: str, sender: str, body: str) -> dict[str, Any] | None:
     subject_lower = subject.lower()
     sender_lower = sender.lower()
@@ -525,6 +530,7 @@ async def save_email_to_baserow(payload: dict[str, Any]) -> dict[str, Any]:
     headers = {
         "Authorization": f"Token {BASEROW_API_TOKEN}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
     params = {"user_field_names": str(BASEROW_USER_FIELD_NAMES).lower()}
     url = f"{BASEROW_BASE_URL}/api/database/rows/table/{BASEROW_TABLE_ID}/"
@@ -534,11 +540,28 @@ async def save_email_to_baserow(payload: dict[str, Any]) -> dict[str, Any]:
             response = await client.post(url, headers=headers, params=params, json=payload)
             response.raise_for_status()
         except httpx.RequestError as exc:
-            raise HTTPException(status_code=503, detail="No se pudo conectar con Baserow.") from exc
+            raise HTTPException(
+                status_code=503,
+                detail=f"No se pudo conectar con Baserow en {url}.",
+            ) from exc
         except httpx.HTTPStatusError as exc:
+            content_type = exc.response.headers.get("content-type", "")
+            body_preview = compact_error_text(exc.response.text)
+            if "text/html" in content_type.lower():
+                detail = (
+                    f"Baserow no devolvio JSON util. "
+                    f"status={exc.response.status_code}, content_type={content_type}, url={url}, "
+                    f"body_preview={body_preview}"
+                )
+            else:
+                detail = (
+                    f"Baserow devolvio un error. "
+                    f"status={exc.response.status_code}, content_type={content_type or 'unknown'}, "
+                    f"url={url}, body={body_preview}"
+                )
             raise HTTPException(
                 status_code=502,
-                detail=f"Baserow devolvio un error: {exc.response.text}",
+                detail=detail,
             ) from exc
     return response.json()
 
