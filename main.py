@@ -24,7 +24,6 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 TELEGRAM_ALLOWED_ADMIN_IDS = {
     item.strip() for item in os.getenv("TELEGRAM_ALLOWED_ADMIN_IDS", "").split(",") if item.strip()
 }
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")
 CORRECTOR_MODEL = os.getenv("CORRECTOR_MODEL", DEFAULT_MODEL)
 NOTION_API_TOKEN = os.getenv("NOTION_API_TOKEN", "")
 NOTION_CONTENT_DB_ID = os.getenv("NOTION_CONTENT_DB_ID", "")
@@ -52,47 +51,6 @@ Responde SIEMPRE con este formato:
 No inventes instrucciones del alumno. Si el texto es muy corto, indicalo con claridad.
 """.strip()
 
-
-QUICKINGLES_DRAFT_PROMPT = """
-Actuas como asistente editorial del canal de Telegram "Quickinglés".
-
-Tu trabajo NO es escribir articulos largos ni textos genericos sobre aprender ingles.
-Tu trabajo es crear posts cortos, visuales, didacticos y publicables en Telegram.
-
-ESTILO DEL CANAL
-- tono claro, cercano y practico
-- foco en ingles real y util
-- explicaciones muy faciles de escanear
-- nada de relleno, nada de motivacion vacia, nada de sonar a blog
-- debe parecer contenido hecho para alumnos reales que quieren mejorar su ingles
-
-FORMATO DESEADO
-- titulo corto con emoji
-- una etiqueta o subtitulo corto tipo categoria
-- explicacion central breve
-- ejemplos en ingles con traduccion usando este formato:
-  Example:
-  "texto en ingles"
-  -> traduccion
-- un bloque extra tipo "English Boost", "3 ejemplos utiles" o "Mini reto" cuando encaje
-- cierre con firma exacta:
-  Jesus | Quickinglés
-
-REGLAS IMPORTANTES
-- no hagas posts demasiado largos
-- prioriza claridad y utilidad real
-- usa emojis con moderacion
-- si el tema compara dos expresiones, deja muy clara la diferencia
-- si el tema es de error comun, explica el error y da la forma correcta
-- evita listas eternas
-- evita frases como "en el mundo digital de hoy" o cualquier tono generico
-- no menciones IA ni metodologia salvo que el tema vaya de eso
-
-OBJETIVO FINAL
-Entregar un borrador listo para pegar en Telegram, con estilo Quickinglés, no un esquema ni una explicacion para el creador.
-
-Si falta contexto, usa la idea principal y conviertela en un borrador util, breve y publicable.
-""".strip()
 
 
 EMAIL_CLASSIFICATION_PROMPT = """
@@ -124,6 +82,41 @@ Reglas:
 - no devuelvas texto extra
 - si dudas entre varias categorias, usa "otro"
 - si la confianza es menor de 0.7, needs_review debe ser true
+""".strip()
+
+
+TELEGRAM_TASK_PROMPT = """
+Actuas como asistente operativo del bot de Telegram Alert Blog Bot.
+
+Tu trabajo es leer un bloque de texto libre y devolver una ficha corta y util para decidir que hacer con el contenido.
+
+Clasifica SOLO en una de estas categorias:
+- alerta
+- idea
+- tarea
+- seguimiento
+- otro
+
+Prioridad permitida:
+- alta
+- media
+- baja
+
+Devuelve SOLO JSON valido con este formato exacto:
+{
+  "summary": "resumen corto en espanol",
+  "category": "alerta|idea|tarea|seguimiento|otro",
+  "priority": "alta|media|baja",
+  "next_action": "siguiente paso sugerido en una frase",
+  "needs_review": false
+}
+
+Reglas:
+- resumen en 1 o 2 frases maximo
+- no inventes datos que no aparezcan en el texto
+- usa "otro" si el contenido no encaja bien
+- usa needs_review=true si faltan datos, hay ambiguedad o la prioridad no esta clara
+- no devuelvas texto fuera del JSON
 """.strip()
 
 
@@ -173,6 +166,14 @@ def init_db() -> None:
                 direction TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
+            """
+        )
+        # Evita procesar dos veces el mismo update entrante si Telegram reintenta el webhook.
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_updates_incoming_update_id
+            ON telegram_updates (telegram_update_id)
+            WHERE direction = 'in' AND telegram_update_id IS NOT NULL
             """
         )
         connection.commit()
@@ -268,34 +269,9 @@ class TelegramConfigResponse(BaseModel):
     enabled: bool
     has_bot_token: bool
     has_webhook_secret: bool
-    has_channel_id: bool
     admin_ids_configured: int
     corrector_model: str | None
 
-
-class TelegramChannelContentRequest(BaseModel):
-    topic: str = Field(..., min_length=3, description="Tema principal del post")
-    angle: str | None = Field(default=None, description="Enfoque concreto del contenido")
-    audience: str = Field(
-        default="estudiantes hispanohablantes que quieren mejorar su ingles real",
-        description="Publico objetivo del contenido",
-    )
-    objective: str | None = Field(default=None, description="Objetivo del post")
-    content_type: str = Field(default="telegram_post", description="Tipo de pieza a generar")
-    extra_notes: str | None = Field(default=None, description="Notas adicionales para el borrador")
-    include_cta: bool = Field(default=False, description="Si quieres una llamada a la accion breve")
-    model: str | None = Field(default=None, description="Modelo opcional de Ollama")
-    publish: bool = Field(default=False, description="Si es true, publica el borrador en el canal")
-
-
-class TelegramChannelContentResponse(BaseModel):
-    status: str
-    model: str
-    draft: str
-    published: bool
-    channel_id: str | None = None
-    telegram_message_id: int | None = None
-    created_at: str
 
 
 class EmailProcessRequest(BaseModel):
@@ -345,22 +321,10 @@ class NotionIdeaItem(BaseModel):
     tipo: str | None = None
     estado: str | None = None
     prioridad: str | None = None
-    canal: str | None = None
     notas: str | None = None
     fecha: str | None = None
     notion_url: str | None = None
 
-
-class NotionDraftsRequest(BaseModel):
-    limit: int = Field(default=3, ge=1, le=10)
-    status: str = Field(default="Idea")
-    model: str | None = None
-
-
-class NotionDraftItem(BaseModel):
-    idea: NotionIdeaItem
-    model: str
-    draft: str
 
 
 async def fetch_ollama_models() -> list[dict[str, Any]]:
@@ -417,9 +381,29 @@ def normalize_email_category(value: str | None) -> str:
     return normalized if normalized in allowed else "otro"
 
 
+def normalize_task_category(value: str | None) -> str:
+    allowed = {"alerta", "idea", "tarea", "seguimiento", "otro"}
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in allowed else "otro"
+
+
+def normalize_task_priority(value: str | None) -> str:
+    allowed = {"alta", "media", "baja"}
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in allowed else "media"
+
+
 def compact_error_text(value: str, limit: int = 300) -> str:
     cleaned = " ".join(value.split())
     return cleaned[:limit]
+
+
+def parse_confidence_value(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = default
+    return max(0.0, min(numeric_value, 1.0))
 
 
 def rule_based_email_classification(subject: str, sender: str, body: str) -> dict[str, Any] | None:
@@ -511,12 +495,39 @@ async def classify_email_with_ollama(payload: EmailProcessRequest) -> tuple[str,
     result = {
         "summary": str(parsed.get("summary", "")).strip() or "Sin resumen",
         "category": normalize_email_category(parsed.get("category")),
-        "confidence": max(0.0, min(float(parsed.get("confidence", 0.0)), 1.0)),
+        "confidence": parse_confidence_value(parsed.get("confidence", 0.0)),
         "needs_review": bool(parsed.get("needs_review", True)),
         "rule_applied": None,
     }
     if result["confidence"] < 0.7:
         result["needs_review"] = True
+    return model_used, result
+
+
+async def classify_telegram_task(text: str) -> tuple[str, dict[str, Any]]:
+    model_used, raw_response = await generate_with_ollama(
+        message=text.strip(),
+        system_prompt=TELEGRAM_TASK_PROMPT,
+    )
+
+    try:
+        parsed = json.loads(raw_response)
+    except json.JSONDecodeError:
+        parsed = {
+            "summary": raw_response.strip()[:400] or "No se pudo resumir el texto correctamente.",
+            "category": "otro",
+            "priority": "media",
+            "next_action": "Revisar manualmente el contenido original.",
+            "needs_review": True,
+        }
+
+    result = {
+        "summary": str(parsed.get("summary", "")).strip() or "Sin resumen",
+        "category": normalize_task_category(parsed.get("category")),
+        "priority": normalize_task_priority(parsed.get("priority")),
+        "next_action": str(parsed.get("next_action", "")).strip() or "Revisar manualmente el contenido original.",
+        "needs_review": bool(parsed.get("needs_review", True)),
+    }
     return model_used, result
 
 
@@ -567,9 +578,13 @@ async def save_email_to_baserow(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def fetch_openclaw_health() -> dict[str, Any]:
+    headers: dict[str, str] = {}
+    if OPENCLAW_TOKEN:
+        headers["Authorization"] = f"Bearer {OPENCLAW_TOKEN}"
+
     async with httpx.AsyncClient(timeout=OPENCLAW_TIMEOUT_SECONDS) as client:
         try:
-            response = await client.get(f"{OPENCLAW_BASE_URL}/health")
+            response = await client.get(f"{OPENCLAW_BASE_URL}/health", headers=headers)
             response.raise_for_status()
         except httpx.RequestError as exc:
             raise HTTPException(
@@ -683,7 +698,6 @@ def parse_notion_idea(page: dict[str, Any]) -> NotionIdeaItem:
         tipo=extract_notion_text(properties.get("Tipo")),
         estado=extract_notion_text(properties.get("Estado")),
         prioridad=extract_notion_text(properties.get("Prioridad")),
-        canal=extract_notion_text(properties.get("Canal")),
         notas=extract_notion_text(properties.get("Notas")),
         fecha=extract_notion_text(properties.get("Fecha")),
         notion_url=page.get("url"),
@@ -722,39 +736,6 @@ async def fetch_notion_ideas(status: str = "Idea", limit: int = 10) -> list[Noti
     filtered = [idea for idea in ideas if normalize_estado(idea.estado) == target]
     return filtered[:limit]
 
-
-async def build_quickingles_draft(idea: NotionIdeaItem, model: str | None = None) -> tuple[str, str]:
-    message = (
-        f"Tema principal: {idea.idea}\n\n"
-        f"Descripcion: {idea.descripcion or 'Sin descripcion'}\n"
-        f"Tipo: {idea.tipo or 'No definido'}\n"
-        f"Canal: {idea.canal or 'Quickinglés'}\n"
-        f"Notas: {idea.notas or 'Sin notas adicionales'}\n"
-        "Genera un borrador listo para Telegram siguiendo el estilo Quickinglés."
-    )
-    return await generate_with_ollama(
-        message=message,
-        model=model,
-        system_prompt=QUICKINGLES_DRAFT_PROMPT,
-    )
-
-
-def build_telegram_channel_prompt(payload: TelegramChannelContentRequest) -> str:
-    cta_instruction = (
-        "Incluye una llamada a la accion final muy breve y natural."
-        if payload.include_cta
-        else "No incluyas llamada a la accion final salvo que encaje de forma muy natural."
-    )
-    return (
-        f"Tema principal: {payload.topic}\n"
-        f"Angulo: {payload.angle or 'Elige el enfoque mas util y claro para Telegram'}\n"
-        f"Audiencia: {payload.audience}\n"
-        f"Objetivo: {payload.objective or 'Aportar valor practico y publicable en el canal'}\n"
-        f"Tipo de contenido: {payload.content_type}\n"
-        f"Notas extra: {payload.extra_notes or 'Sin notas extra'}\n"
-        f"{cta_instruction}\n"
-        "Devuelve un borrador final listo para publicar en Telegram."
-    )
 
 
 async def fetch_telegram_updates(offset: int | None = None, timeout_seconds: int = 30) -> list[dict[str, Any]]:
@@ -802,6 +783,23 @@ def save_telegram_log(
         connection.commit()
 
 
+def has_processed_telegram_update(telegram_update_id: str | None) -> bool:
+    if not telegram_update_id:
+        return False
+
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM telegram_updates
+            WHERE telegram_update_id = ? AND direction = 'in'
+            LIMIT 1
+            """,
+            (telegram_update_id,),
+        ).fetchone()
+    return row is not None
+
+
 def is_admin_user(user_id: str | None) -> bool:
     return bool(user_id and user_id in TELEGRAM_ALLOWED_ADMIN_IDS)
 
@@ -815,11 +813,6 @@ async def send_telegram_message(chat_id: str, text: str) -> dict[str, Any]:
         },
     )
 
-
-async def publish_to_channel(text: str) -> dict[str, Any]:
-    if not TELEGRAM_CHANNEL_ID:
-        raise HTTPException(status_code=503, detail="TELEGRAM_CHANNEL_ID no esta configurado.")
-    return await send_telegram_message(TELEGRAM_CHANNEL_ID, text)
 
 
 async def correct_writing(student_text: str) -> tuple[str, str]:
@@ -853,7 +846,7 @@ async def handle_private_message(
             "3. texto corregido\n"
             "4. consejos breves\n\n"
             "Si eres admin, tambien puedes usar:\n"
-            "/publish texto"
+            "/task texto o bloque"
         )
         await send_telegram_message(chat_id, reply_text)
         save_telegram_log(
@@ -867,9 +860,9 @@ async def handle_private_message(
         )
         return {"status": "ok", "action": "help"}
 
-    if normalized.lower().startswith("/publish"):
+    if normalized.lower().startswith("/task"):
         if not is_admin_user(user_id):
-            reply_text = "No tienes permisos para publicar en el canal."
+            reply_text = "No tienes permisos para usar /task."
             await send_telegram_message(chat_id, reply_text)
             save_telegram_log(
                 telegram_update_id=telegram_update_id,
@@ -880,11 +873,15 @@ async def handle_private_message(
                 message_text=reply_text,
                 direction="out",
             )
-            return {"status": "ok", "action": "publish_denied"}
+            return {"status": "ok", "action": "task_denied"}
 
-        publish_text = normalized[len("/publish") :].strip()
-        if not publish_text:
-            reply_text = "Usa /publish seguido del texto que quieres enviar al canal."
+        task_text = normalized[len("/task") :].strip()
+        if not task_text:
+            reply_text = (
+                "Usa /task seguido del texto que quieres clasificar.\n\n"
+                "Ejemplo:\n"
+                "/task Cliente pide revisar landing y presupuesto antes del viernes."
+            )
             await send_telegram_message(chat_id, reply_text)
             save_telegram_log(
                 telegram_update_id=telegram_update_id,
@@ -895,10 +892,19 @@ async def handle_private_message(
                 message_text=reply_text,
                 direction="out",
             )
-            return {"status": "ok", "action": "publish_usage"}
+            return {"status": "ok", "action": "task_usage"}
 
-        await publish_to_channel(publish_text)
-        reply_text = "Contenido publicado en el canal."
+        model_used, task_result = await classify_telegram_task(task_text)
+        review_text = "si" if task_result["needs_review"] else "no"
+        reply_text = (
+            "Ficha rapida\n\n"
+            f"Resumen: {task_result['summary']}\n"
+            f"Categoria: {task_result['category']}\n"
+            f"Prioridad: {task_result['priority']}\n"
+            f"Siguiente paso: {task_result['next_action']}\n"
+            f"Revision manual: {review_text}\n"
+            f"Modelo: {model_used}"
+        )
         await send_telegram_message(chat_id, reply_text)
         save_telegram_log(
             telegram_update_id=telegram_update_id,
@@ -909,7 +915,7 @@ async def handle_private_message(
             message_text=reply_text,
             direction="out",
         )
-        return {"status": "ok", "action": "publish_success"}
+        return {"status": "ok", "action": "task_classified", "model": model_used}
 
     model_used, correction = await correct_writing(normalized)
     await send_telegram_message(chat_id, correction)
@@ -969,15 +975,21 @@ async def process_telegram_update(update: dict[str, Any]) -> dict[str, Any]:
     username = from_user.get("username")
     update_id = str(update.get("update_id")) if update.get("update_id") is not None else None
 
-    save_telegram_log(
-        telegram_update_id=update_id,
-        chat_id=chat_id,
-        user_id=user_id,
-        username=username,
-        chat_type=chat_type,
-        message_text=text,
-        direction="in",
-    )
+    if has_processed_telegram_update(update_id):
+        return {"status": "ignored", "reason": "duplicate_update"}
+
+    try:
+        save_telegram_log(
+            telegram_update_id=update_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            chat_type=chat_type,
+            message_text=text,
+            direction="in",
+        )
+    except sqlite3.IntegrityError:
+        return {"status": "ignored", "reason": "duplicate_update"}
 
     if chat_type == "private":
         return await handle_private_message(
@@ -1035,7 +1047,7 @@ def health() -> HealthResponse:
 @app.get("/openclaw/config", response_model=OpenClawConfigResponse, tags=["openclaw"])
 def openclaw_config() -> OpenClawConfigResponse:
     return OpenClawConfigResponse(
-        enabled=bool(OPENCLAW_BASE_URL),
+        enabled=bool(os.getenv("OPENCLAW_BASE_URL") or OPENCLAW_TOKEN),
         base_url=OPENCLAW_BASE_URL,
         has_token=bool(OPENCLAW_TOKEN),
         timeout_seconds=OPENCLAW_TIMEOUT_SECONDS,
@@ -1268,44 +1280,11 @@ def telegram_config() -> TelegramConfigResponse:
         enabled=bool(TELEGRAM_BOT_TOKEN),
         has_bot_token=bool(TELEGRAM_BOT_TOKEN),
         has_webhook_secret=bool(TELEGRAM_WEBHOOK_SECRET),
-        has_channel_id=bool(TELEGRAM_CHANNEL_ID),
         admin_ids_configured=len(TELEGRAM_ALLOWED_ADMIN_IDS),
         corrector_model=CORRECTOR_MODEL or None,
     )
 
 
-@app.post(
-    "/telegram/channel/content",
-    response_model=TelegramChannelContentResponse,
-    tags=["telegram"],
-)
-async def telegram_channel_content(
-    payload: TelegramChannelContentRequest,
-) -> TelegramChannelContentResponse:
-    prompt = build_telegram_channel_prompt(payload)
-    model_used, draft = await generate_with_ollama(
-        message=prompt,
-        model=payload.model,
-        system_prompt=QUICKINGLES_DRAFT_PROMPT,
-    )
-
-    published = False
-    telegram_message_id: int | None = None
-    if payload.publish:
-        telegram_response = await publish_to_channel(draft)
-        published = bool(telegram_response.get("ok"))
-        result = telegram_response.get("result") or {}
-        telegram_message_id = result.get("message_id")
-
-    return TelegramChannelContentResponse(
-        status="ok",
-        model=model_used,
-        draft=draft,
-        published=published,
-        channel_id=TELEGRAM_CHANNEL_ID or None,
-        telegram_message_id=telegram_message_id,
-        created_at=utc_now(),
-    )
 
 
 @app.get("/notion/config", response_model=NotionConfigResponse, tags=["notion"])
@@ -1324,14 +1303,6 @@ async def notion_ideas(status: str = "Idea", limit: int = 10) -> list[NotionIdea
     return await fetch_notion_ideas(status=status, limit=safe_limit)
 
 
-@app.post("/notion/ideas/drafts", response_model=list[NotionDraftItem], tags=["notion"])
-async def notion_ideas_drafts(payload: NotionDraftsRequest) -> list[NotionDraftItem]:
-    ideas = await fetch_notion_ideas(status=payload.status, limit=payload.limit)
-    drafts: list[NotionDraftItem] = []
-    for idea in ideas:
-        model_used, draft = await build_quickingles_draft(idea, model=payload.model)
-        drafts.append(NotionDraftItem(idea=idea, model=model_used, draft=draft))
-    return drafts
 
 
 @app.post("/telegram/webhook", tags=["telegram"])
@@ -1343,3 +1314,6 @@ async def telegram_webhook(
         raise HTTPException(status_code=401, detail="Secret token de Telegram invalido.")
     update = payload.model_dump(exclude_none=True)
     return await process_telegram_update(update)
+
+
+
