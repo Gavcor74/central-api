@@ -200,6 +200,43 @@ Configuracion recomendada:
 - variables de entorno definidas en EasyPanel
 - `OLLAMA_BASE_URL` apuntando a tu instancia interna de Ollama
 
+## Despliegue de OpenClaw en EasyPanel
+
+Para que `openclaw` funcione como bot y no se apague al arrancar:
+
+- usa un proceso de Gateway largo y no un comando de una sola ejecucion
+- monta persistencia para `~/.openclaw` o `/home/node/.openclaw`
+- usa `gateway.bind=lan` en contenedores con puerto publicado
+- configura autenticacion de Gateway con token o password
+- si el primer arranque falla por config incompleta, prueba `--allow-unconfigured` solo para bootstrap
+
+Ejemplo de comando de arranque:
+
+```bash
+openclaw gateway --port 18789 --bind lan --allow-unconfigured
+```
+
+Variables recomendadas para `openclaw`:
+
+```env
+OPENCLAW_GATEWAY_PORT=18789
+OPENCLAW_GATEWAY_BIND=lan
+OPENCLAW_GATEWAY_TOKEN=tu_token
+OPENCLAW_STATE_DIR=/home/node/.openclaw
+OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json
+OPENCLAW_HOME=/home/node
+API_CENTRAL_URL=http://api:8000
+OLLAMA_BASE_URL=http://ollama_ollama:11434
+OLLAMA_MODEL=llama3.2:latest
+OLLAMA_TIMEOUT_SECONDS=45
+```
+
+Notas:
+
+- `lan` es importante en Docker; con `loopback` el puerto queda dentro del contenedor y no responde desde fuera.
+- Si el Gateway requiere auth, el token tiene que coincidir entre el servicio y el cliente/control UI.
+- Si OpenClaw se queda con `exit code: 0`, normalmente significa que no está corriendo como proceso persistente o que el comando de arranque no es el adecuado.
+
 ## Handoff para el sobremesa
 
 Si vas a seguir desde el ordenador de sobremesa, la fuente de verdad es GitHub.

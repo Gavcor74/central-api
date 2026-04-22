@@ -324,6 +324,11 @@ class OpenClawConfigResponse(BaseModel):
     base_url: str | None
     has_api_key: bool
     api_central_url: str | None = None
+    gateway_port: int | None = None
+    gateway_bind: str | None = None
+    has_gateway_token: bool = False
+    state_dir: str | None = None
+    config_path: str | None = None
 
 
 class OpenClawPlanResponse(BaseModel):
@@ -331,6 +336,11 @@ class OpenClawPlanResponse(BaseModel):
     base_url: str | None
     has_api_key: bool
     api_central_url: str | None = None
+    gateway_port: int | None = None
+    gateway_bind: str | None = None
+    has_gateway_token: bool = False
+    state_dir: str | None = None
+    config_path: str | None = None
     recommended_mode: str
     next_steps: list[str]
 
@@ -1236,6 +1246,11 @@ def openclaw_plan() -> OpenClawPlanResponse:
         base_url=base_url,
         has_api_key=bool(config["has_api_key"]),
         api_central_url=config.get("api_central_url") or API_CENTRAL_URL or None,
+        gateway_port=config.get("gateway_port"),
+        gateway_bind=config.get("gateway_bind"),
+        has_gateway_token=bool(config.get("has_gateway_token")),
+        state_dir=config.get("state_dir"),
+        config_path=config.get("config_path"),
         recommended_mode=recommended_mode,
         next_steps=next_steps,
     )

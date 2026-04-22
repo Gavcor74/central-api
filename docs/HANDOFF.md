@@ -66,6 +66,33 @@ En EasyPanel, para que el flujo quede claro, define también:
 
 Y en `secretaria`, haz que el bot apunte a `API CENTRAL` en vez de hablar con Ollama directamente para tareas operativas.
 
+## OpenClaw en EasyPanel
+
+Si `openclaw` se queda con `exit code: 0`, no lo trates como un bot vivo todavía.
+
+Revisa que el servicio use:
+
+- un proceso persistente de Gateway
+- `gateway.bind=lan` cuando publique puerto
+- persistencia para `/home/node/.openclaw`
+- auth por token o password
+- `--allow-unconfigured` solo para el primer bootstrap si la config no existe todavía
+
+Comando de referencia:
+
+```bash
+openclaw gateway --port 18789 --bind lan --allow-unconfigured
+```
+
+Variables mínimas de referencia:
+
+- `OPENCLAW_GATEWAY_PORT=18789`
+- `OPENCLAW_GATEWAY_BIND=lan`
+- `OPENCLAW_GATEWAY_TOKEN=...`
+- `OPENCLAW_STATE_DIR=/home/node/.openclaw`
+- `OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json`
+- `API_CENTRAL_URL=http://api:8000`
+
 ## Regla de trabajo
 
 GitHub es la fuente de verdad. Todo cambio importante debe quedar subido para poder continuar desde cualquier ordenador.
