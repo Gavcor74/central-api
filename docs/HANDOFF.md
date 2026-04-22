@@ -11,6 +11,23 @@
 - un transcriptor aparte para clases de inglés
 - despliegue en tu VPS / EasyPanel
 
+## Flujo objetivo
+
+Para tareas delicadas, el orden recomendado es:
+
+1. `secretaria` recibe el mensaje por Telegram.
+2. `secretaria` llama a `API CENTRAL`.
+3. `API CENTRAL` interpreta, prepara el borrador y decide si hace falta confirmación.
+4. `OpenClaw` ejecuta solo cuando la acción ya está aprobada.
+5. `API CENTRAL` registra todo y devuelve el resultado.
+
+Regla práctica:
+
+- `API CENTRAL` decide
+- `OpenClaw` ejecuta
+- `secretaria` habla con el usuario
+- `Ollama` redacta y ayuda a razonar
+
 ## Estado actual
 
 La API ya incluye:
@@ -33,10 +50,21 @@ La API ya incluye:
 
 ## Qué falta por construir
 
-- integración real con OpenClaw si decidimos activarla
+- conectar `secretaria` a `API CENTRAL` como entrada principal
+- integrar `OpenClaw` como capa de ejecución cuando haya aprobación
 - conector de Notion MCP si queremos acceso más directo al workspace
 - transcriptor de audio a texto
 - separación en módulos si el proyecto crece
+
+## Variables nuevas recomendadas
+
+En EasyPanel, para que el flujo quede claro, define también:
+
+- `API_CENTRAL_URL=http://api:8000`
+- `OPENCLAW_BASE_URL=...`
+- `OPENCLAW_API_KEY=...`
+
+Y en `secretaria`, haz que el bot apunte a `API CENTRAL` en vez de hablar con Ollama directamente para tareas operativas.
 
 ## Regla de trabajo
 

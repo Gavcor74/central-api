@@ -55,6 +55,7 @@ NOTION_CONTENT_DB_ID = os.getenv("NOTION_CONTENT_DB_ID", "")
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
 OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "")
 OPENCLAW_API_KEY = os.getenv("OPENCLAW_API_KEY", "")
+API_CENTRAL_URL = os.getenv("API_CENTRAL_URL", "")
 NOTION_MCP_URL = os.getenv("NOTION_MCP_URL", "")
 NOTION_MCP_API_KEY = os.getenv("NOTION_MCP_API_KEY", "")
 TRANSCRIBER_PROVIDER = os.getenv("TRANSCRIBER_PROVIDER", "")
@@ -322,12 +323,14 @@ class OpenClawConfigResponse(BaseModel):
     enabled: bool
     base_url: str | None
     has_api_key: bool
+    api_central_url: str | None = None
 
 
 class OpenClawPlanResponse(BaseModel):
     enabled: bool
     base_url: str | None
     has_api_key: bool
+    api_central_url: str | None = None
     recommended_mode: str
     next_steps: list[str]
 
@@ -450,6 +453,34 @@ class NotionDraftItem(BaseModel):
     draft: str
 
 
+class EmailWorkflowRequest(BaseModel):
+    recipient_name: str = Field(..., min_length=2, description="Nombre de la persona o centro destinatario")
+    recipient_email: str | None = Field(default=None, description="Correo destino si ya lo conoces")
+    subject_hint: str | None = Field(default=None, description="Idea breve para el asunto")
+    context: str = Field(..., min_length=3, description="Contexto de la solicitud")
+    tone: str = Field(default="claro, educado y directo", description="Tono deseado del correo")
+    language: str = Field(default="es", description="Idioma del borrador final")
+    sender_name: str | None = Field(default=None, description="Nombre con el que quieres firmar")
+    send_now: bool = Field(
+        default=False,
+        description="Si es true, se prepara el flujo como listo para ejecutar tras confirmacion",
+    )
+    model: str | None = Field(default=None, description="Modelo opcional de Ollama")
+
+
+class EmailWorkflowResponse(BaseModel):
+    status: str
+    model: str
+    recipient_name: str
+    recipient_email: str | None = None
+    subject: str
+    body: str
+    approval_required: bool
+    execution_mode: str
+    next_step: str
+    created_at: str
+
+
 async def fetch_ollama_models() -> list[dict[str, Any]]:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
@@ -506,6 +537,19 @@ async def generate_with_ollama(
 
     data = response.json()
     return selected_model, data.get("response", "")
+
+
+def safe_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if "\n" in stripped:
+            stripped = stripped.split("\n", 1)[1]
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 async def telegram_api_request(method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -746,6 +790,72 @@ async def general_assistant_reply(user_text: str) -> tuple[str, str]:
         model=None,
         system_prompt=GENERAL_ASSISTANT_PROMPT,
     )
+
+
+EMAIL_WORKFLOW_PROMPT = """
+Eres el cerebro central de API CENTRAL para preparar correos sensibles.
+
+Tu trabajo es:
+- transformar una solicitud humana en un borrador de correo listo para revisar
+- mantener un tono claro, educado y operativo
+- no inventar datos ausentes
+- marcar que el envio necesita confirmacion humana antes de ejecutarse
+
+Devuelve SOLO JSON valido con esta estructura exacta:
+{
+  "subject": "asunto breve",
+  "body": "cuerpo completo del correo",
+  "approval_required": true,
+  "next_step": "siguiente accion recomendada"
+}
+
+Reglas:
+- el cuerpo debe ser util, directo y profesional
+- si el usuario pide enviar un correo urgente o delicado, sigue marcando approval_required=true
+- si falta un dato clave, incluye una nota breve en el body pidiendo confirmacion del campo que falte
+- no añadas texto fuera del JSON
+""".strip()
+
+
+async def build_email_workflow(payload: EmailWorkflowRequest) -> tuple[str, dict[str, Any]]:
+    message = (
+        f"Destinatario: {payload.recipient_name}\n"
+        f"Email destinatario: {payload.recipient_email or 'No especificado'}\n"
+        f"Asunto sugerido: {payload.subject_hint or 'Elige un asunto claro y breve'}\n"
+        f"Contexto: {payload.context}\n"
+        f"Tono: {payload.tone}\n"
+        f"Idioma final: {payload.language}\n"
+        f"Firma: {payload.sender_name or 'API CENTRAL'}\n"
+        f"Preparar para envio inmediato: {'si' if payload.send_now else 'no'}\n"
+    )
+    model_used, raw_response = await generate_with_ollama(
+        message=message,
+        model=payload.model,
+        system_prompt=EMAIL_WORKFLOW_PROMPT,
+    )
+
+    parsed = safe_json_object(raw_response)
+    if not parsed:
+        parsed = {
+            "subject": payload.subject_hint or f"Mensaje para {payload.recipient_name}",
+            "body": raw_response.strip() or payload.context.strip(),
+            "approval_required": True,
+            "next_step": "Revisar el borrador y confirmar antes de enviar.",
+        }
+
+    subject = str(parsed.get("subject", "")).strip() or (
+        payload.subject_hint or f"Mensaje para {payload.recipient_name}"
+    )
+    body = str(parsed.get("body", "")).strip() or payload.context.strip()
+    approval_required = bool(parsed.get("approval_required", True))
+    next_step = str(parsed.get("next_step", "")).strip() or "Revisar el borrador y confirmar antes de enviar."
+
+    return model_used, {
+        "subject": subject,
+        "body": body,
+        "approval_required": approval_required,
+        "next_step": next_step,
+    }
 
 
 async def handle_private_message(
@@ -1110,21 +1220,22 @@ def openclaw_plan() -> OpenClawPlanResponse:
     if enabled:
         recommended_mode = "vps_gateway"
         next_steps = [
-            "OpenClaw ya puede apuntar a tu VPS.",
+            "Conecta OpenClaw a API CENTRAL como cerebro de decision.",
             "Mantén Ollama en la URL interna que ya validaste.",
-            "Cuando quieras, conectamos canales y automatizaciones encima.",
+            "Usa OpenClaw solo para ejecutar acciones aprobadas.",
         ]
     else:
         recommended_mode = "needs_configuration"
         next_steps = [
             "Configura OPENCLAW_BASE_URL en EasyPanel.",
-            "Decide si OpenClaw vivira en el VPS o se usara solo como gateway externo.",
+            "Define API_CENTRAL_URL para que OpenClaw y secretaria sepan a donde llamar.",
             "Cuando el base_url exista, podras conectarlo al resto del sistema.",
         ]
     return OpenClawPlanResponse(
         enabled=enabled,
         base_url=base_url,
         has_api_key=bool(config["has_api_key"]),
+        api_central_url=config.get("api_central_url") or API_CENTRAL_URL or None,
         recommended_mode=recommended_mode,
         next_steps=next_steps,
     )
@@ -1439,6 +1550,34 @@ def notion_config() -> NotionConfigResponse:
 async def notion_ideas(status: str = "Idea", limit: int = 10) -> list[NotionIdeaItem]:
     safe_limit = min(max(limit, 1), 20)
     return await fetch_notion_ideas(status=status, limit=safe_limit)
+
+
+@app.post(
+    "/workflows/email/brief",
+    response_model=EmailWorkflowResponse,
+    tags=["workflows"],
+    dependencies=[Depends(require_api_key)],
+)
+async def workflows_email_brief(payload: EmailWorkflowRequest) -> EmailWorkflowResponse:
+    model_used, result = await build_email_workflow(payload)
+    approval_required = bool(result["approval_required"]) or not payload.send_now
+    execution_mode = "prepare_and_confirm" if approval_required else "prepare_only"
+    next_step = result["next_step"]
+    if approval_required and "confirm" not in next_step.lower():
+        next_step = f"{next_step} Confirma el envio antes de ejecutar."
+
+    return EmailWorkflowResponse(
+        status="ok",
+        model=model_used,
+        recipient_name=payload.recipient_name,
+        recipient_email=payload.recipient_email,
+        subject=result["subject"],
+        body=result["body"],
+        approval_required=approval_required,
+        execution_mode=execution_mode,
+        next_step=next_step,
+        created_at=utc_now(),
+    )
 
 
 @app.post("/notion/ideas/drafts", response_model=list[NotionDraftItem], tags=["notion"], dependencies=[Depends(require_api_key)])

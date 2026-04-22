@@ -11,9 +11,26 @@ Este repo existe para ser el punto comun entre:
 - un transcriptor en vivo para tus clases de ingles
 - tu VPS y EasyPanel como lugar de despliegue
 
+## Flujo recomendado
+
+Para tareas delicadas como mandar un correo al colegio:
+
+1. `secretaria` recibe el mensaje por Telegram.
+2. `secretaria` llama a `API CENTRAL`.
+3. `API CENTRAL` prepara el borrador y marca si hace falta confirmacion.
+4. `OpenClaw` ejecuta solo cuando la accion ya esta aprobada.
+5. `API CENTRAL` guarda el rastro y devuelve el resultado.
+
+En ese esquema:
+
+- `API CENTRAL` es el cerebro
+- `OpenClaw` es la capa operativa
+- `secretaria` es la interfaz de entrada
+- `Ollama` es el motor de lenguaje
+
 ## Estado actual verificado
 
-La API ya esta desplegada y funcionando en EasyPanel.
+La API esta pensada para despliegue en EasyPanel y la configuracion actual sirve como base operativa del proyecto.
 
 URLs verificadas:
 
@@ -23,10 +40,10 @@ URLs verificadas:
 - `GET /openclaw/plan`: `https://central-api.vdwbjc.easypanel.host/openclaw/plan`
 - `GET /transcriber/plan`: `https://central-api.vdwbjc.easypanel.host/transcriber/plan`
 
-Estado comprobado en produccion:
+Estado comprobado en la ultima configuracion conocida:
 
-- `API CENTRAL` responde `200` en `/health`
-- `Ollama` esta conectado por URL interna
+- `API CENTRAL` responde `200` en `/health` cuando el servicio esta levantado
+- `Ollama` esta conectado por URL interna en la configuracion esperada
 - modelo por defecto actual: `llama3.2:latest`
 - OpenClaw todavia no esta configurado, pero ya hay endpoint de plan
 - el transcriptor ya esta preparado para modo `live`
@@ -100,6 +117,10 @@ Estado comprobado en produccion:
 - `POST /telegram/webhook`
 - `POST /telegram/channel/content`
 
+### Workflows
+
+- `POST /workflows/email/brief`
+
 Comportamiento actual del bot en chat privado:
 
 - responde como asistente general por defecto
@@ -116,6 +137,7 @@ API_KEY=
 OLLAMA_BASE_URL=http://ollama_ollama:11434
 OLLAMA_MODEL=llama3.2:latest
 OLLAMA_TIMEOUT_SECONDS=60
+API_CENTRAL_URL=http://api:8000
 
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=
